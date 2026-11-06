@@ -114,9 +114,12 @@ pub fn refresh_taskbar_item(app: AppHandle, id: String) -> Result<bool, String> 
                     (usage.backoff_until, crate::usage::should_fetch(usage.fetched_at, now, &usage.windows))
                 } else { (0, true) })
         };
-        if !due || !refresh_allowed(crate::claude_auth::state().busy, backoff_until, now) { return Ok(false); }
+        if !due || !refresh_allowed(crate::claude_auth::state_for(account_id).busy, backoff_until, now) { return Ok(false); }
         crate::usage::request_account_refresh(account_id);
         return Ok(true);
+    }
+    if app.state::<AppState>().cfg.lock().unwrap().accounts.iter().any(|a| a.id == id && matches!(a.provider, crate::accounts::ProviderKind::Codex | crate::accounts::ProviderKind::OpenCode)) {
+        return crate::account_usage::refresh_account(app, id);
     }
     if id == "claude" || !crate::TRAY_PROVIDER_IDS.contains(&id.as_str()) {
         return Err("Unknown taskbar account".into());

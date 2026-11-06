@@ -457,8 +457,8 @@ struct Renewer {
 impl Renewer {
     /// Renews if the token is about to expire. Some(true) = the expiry moved; judged on the outcome, never on the
     /// exit status, because refusing the empty prompt is a non-zero exit and a successful renewal at the same time
-    fn maybe_renew(&mut self, cred: &Credential, dir: &Path, who: &str) -> Option<bool> {
-        let _auth = crate::claude_auth::try_acquire()?;
+    fn maybe_renew(&mut self, cred: &Credential, dir: &Path, who: &str, profile_id: &str) -> Option<bool> {
+        let _auth = crate::claude_auth::try_acquire_for(profile_id)?;
         let now = now_ms();
         if !should_renew(cred.expires_at, now, self.attempted_for, self.last_attempt, self.failures) {
             return None;
@@ -806,10 +806,11 @@ fn aggregate(order: &[Profile], accounts: &HashMap<String, Account>) -> UsageSna
 
 /// One account's turn: renew if the token is aging, then read it, exactly as the single-account loop did.
 fn poll_account(p: &Profile, acc: &mut Account, group: Option<&str>) {
+    if crate::claude_auth::state_for(&key(p)).busy { return; }
     let who = p.name();
     // Renewal stays responsive, but token rotation cannot cancel the endpoint's penalty.
     if let Some(cred) = read_credentials(&p.dir) {
-        acc.renewer.maybe_renew(&cred, &p.dir, &who);
+        acc.renewer.maybe_renew(&cred, &p.dir, &who, &key(p));
     }
     // No requests inside this account's back-off window
     if acc.backoff_until > now_ms() {
@@ -919,13 +920,6 @@ pub fn start(app: AppHandle) {
         let mut requested = RefreshRequest::all();
         let mut next_regular = now_ms();
         loop {
-            // A sign-in the user started owns the credential until it finishes. Polling through it
-            // reads a file being rewritten and reports a signed-out account mid-login.
-            if crate::claude_auth::state().busy {
-                // Leave requests queued while authentication owns the credentials.
-                std::thread::sleep(Duration::from_secs(1));
-                continue;
-            }
             requested.merge(take_refresh());
             if now_ms() >= next_regular { requested.merge(RefreshRequest::all()); }
             // Re-read the list each tick: an account signed into or removed while this runs needs no restart

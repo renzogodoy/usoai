@@ -3,6 +3,12 @@
 mod autostart;
 mod backdrop;
 mod config;
+mod accounts;
+mod secrets;
+mod account_usage;
+mod account_commands;
+mod codex_login;
+mod atomic_file;
 mod doctor;
 mod focus;
 mod hooks_install;
@@ -65,6 +71,7 @@ pub const BUILD: &str = "r33";
 pub const NOTCH_LONG: f64 = 650.0;
 
 pub struct AppState {
+    pub account_usage: Mutex<std::collections::HashMap<String, usage::UsageSnapshot>>,
     pub store: Mutex<state::Store>,
     pub cfg: Mutex<config::Config>,
     pub usage: Mutex<usage::UsageSnapshot>,
@@ -601,6 +608,9 @@ fn get_claude_auth() -> claude_auth::AuthState { claude_auth::state() }
 /// Asks one provider to read again, and says whether a reading is on its way. Claude's rate-limit
 /// wait stands, as on the Mac: asking early spends a request and can double the wait.
 pub(crate) fn refresh_provider(app: &AppHandle, provider: &str) -> bool {
+    if app.state::<AppState>().cfg.lock().unwrap().accounts.iter().any(|a| a.id == provider && matches!(a.provider, accounts::ProviderKind::Codex | accounts::ProviderKind::OpenCode)) {
+        return account_usage::refresh_account(app.clone(), provider.into()).unwrap_or(false);
+    }
     match provider {
         "claude" => {
             // Each profile enforces its own retry deadline. One throttled account
@@ -2008,6 +2018,7 @@ fn main() {
                 let out = if args.get(2).map(|s| s.as_str()) == Some("deep") { diag::run() } else { doctor::run() };
                 println!("{out}");
                 let log = config::config_path().with_file_name("doctor.log");
+                if let Some(parent) = log.parent() { let _ = std::fs::create_dir_all(parent); }
                 let _ = std::fs::write(log, &out);
                 return;
             }
@@ -2019,7 +2030,6 @@ fn main() {
     let port = cfg.port;
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Opening Codenotch again while it runs brings Settings forward, as on the Mac: with the
             // tray icon hidden it is the way back. Logged too, for a rebuild that was not picked up.
@@ -2027,6 +2037,7 @@ fn main() {
             settings_window::open(app);
         }))
         .manage(AppState {
+            account_usage: Mutex::new(Default::default()),
             store: Mutex::new(Default::default()),
             cfg: Mutex::new(cfg),
             usage: Mutex::new(usage::load_persisted()),
@@ -2045,6 +2056,16 @@ fn main() {
             activity: Mutex::new(Vec::new()),
         })
         .invoke_handler(tauri::generate_handler![
+            account_usage::get_account_usage,
+            account_usage::refresh_account,
+            account_commands::list_accounts,
+            account_commands::detect_accounts,
+            account_commands::add_account,
+            account_commands::update_account,
+            account_commands::remove_account,
+            account_commands::connect_account,
+            codex_login::get_codex_logins,
+            i18n::account_ui_strings,
             get_state,
             get_usage,
             claude_sign_in,

@@ -13,7 +13,7 @@ pub struct Profile {
 }
 
 fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    crate::accounts::valid_profile_id(id)
 }
 
 fn directory(home: &Path, id: &str) -> Option<PathBuf> {
@@ -29,6 +29,10 @@ pub fn profiles_at(home: &Path, cfg: &Config) -> Vec<Profile> {
             let name = e.file_name().to_string_lossy().to_string();
             let id = name.strip_prefix(".claude-")?;
             if id == "default" || !valid_id(id) || !e.path().is_dir() || !has_credential(&e.path()) { return None; }
+            let canonical = e.path().canonicalize().ok()?;
+            if cfg.excluded_account_dirs.iter().any(|path| path.canonicalize().ok().as_ref() == Some(&canonical)) { return None; }
+            if cfg.accounts.iter().any(|a| a.provider == crate::accounts::ProviderKind::Claude
+                && matches!(&a.source, crate::accounts::CredentialSource::ConfigDir { path } if path.canonicalize().ok().as_ref() == Some(&canonical))) { return None; }
             Some(id.to_string())
         }).collect();
         found.sort();
@@ -38,7 +42,9 @@ pub fn profiles_at(home: &Path, cfg: &Config) -> Vec<Profile> {
         if directory(home, &p.id).is_some() && !ids.contains(&p.id) { ids.push(p.id.clone()); }
     }
     ids.into_iter().filter_map(|id| {
-        let dir = directory(home, &id)?;
+        let account_id = if id == "default" { "claude".to_string() } else { format!("claude-{id}") };
+        let dir = cfg.accounts.iter().find(|a| a.id == account_id)
+            .and_then(|a| crate::accounts::config_dir_at(a, home)).or_else(|| directory(home, &id))?;
         let saved = cfg.claude_profiles.iter().find(|p| p.id == id);
         let name = saved.map(|p| p.name.clone()).unwrap_or_else(|| if id == "default" { "Claude".into() } else { id.clone() });
         Some(Profile { id, dir, name, enabled: saved.map(|p| p.enabled).unwrap_or(true) })

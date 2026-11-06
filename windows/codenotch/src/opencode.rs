@@ -28,27 +28,20 @@
 //! the WAL), then `immutable=1`. Token values never reach logs, events or the UI.
 
 use crate::usage::{calendar_month_duration_ms, LimitWindow, UsageSnapshot, FIVE_HOURS_MS, SEVEN_DAYS_MS};
-use crate::AppState;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
 
 const API_KEY_USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
 const OAUTH_USAGE_URL: &str = "https://opencode.ai/inference/go/v1/usage";
 /// Where an OAuth sign-in's `metadata.server` points when it names none
 const DEFAULT_CONSOLE: &str = "https://opencode.ai/console";
-const POLL_SECS: u64 = 300;
 const BACKOFF_BASE_SECS: u64 = 60;
 const BACKOFF_CAP_SECS: u64 = 900;
 
-static REFRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static BACKOFF_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static CONSECUTIVE_429: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 pub fn request_refresh() {
-    BACKOFF_UNTIL.store(0, std::sync::atomic::Ordering::Relaxed);
-    CONSECUTIVE_429.store(0, std::sync::atomic::Ordering::Relaxed);
-    REFRESH.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::account_usage::request_refresh(crate::accounts::ProviderKind::OpenCode);
 }
 
 fn now_ms() -> u64 {
@@ -70,17 +63,11 @@ pub fn load_persisted() -> UsageSnapshot {
             if !s.windows.is_empty() {
                 s.status = "stale".into();
             }
-            BACKOFF_UNTIL.store(s.backoff_until, std::sync::atomic::Ordering::Relaxed);
             s
         })
         .unwrap_or_default()
 }
 
-fn persist(s: &UsageSnapshot) {
-    if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
-    }
-}
 
 // ---------------- Credentials (borrowed, never written) ----------------
 
@@ -196,22 +183,22 @@ fn credential_from_db(conn: &rusqlite::Connection) -> Option<Credential> {
     })
 }
 
-fn load_credential() -> Option<Credential> {
-    let dirs = data_dirs();
+fn load_credential() -> Option<Credential> { load_credential_in(&data_dirs()) }
+fn load_credential_in(dirs: &[PathBuf]) -> Option<Credential> {
     // 1. the Go plan's own key, as OpenCode wrote it before 1.18 (and the Mac reads it)
-    for d in &dirs {
+    for d in dirs {
         if let Some(c) = read_auth_json(d).and_then(|r| r.get("opencode-go").and_then(|e| credential_from(e, "OpenCode"))) {
             return Some(c);
         }
     }
     // 2. OpenCode 1.18+: the sign-in lives in opencode.db
-    for d in &dirs {
+    for d in dirs {
         if let Some(c) = open_ro(&d.join("opencode.db")).and_then(|conn| credential_from_db(&conn)) {
             return Some(c);
         }
     }
     // 3. the same OAuth sign-in mirrored into auth.json
-    for d in &dirs {
+    for d in dirs {
         let Some(root) = read_auth_json(d) else { continue };
         if let Some(c) = root.get("opencode").filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("oauth")).and_then(|e| credential_from(e, "OpenCode")) {
             return Some(c);
@@ -318,20 +305,34 @@ fn windows_from(v: &serde_json::Value) -> Vec<LimitWindow> {
 
 // ---------------- Putting it together ----------------
 
-fn read_once() -> UsageSnapshot {
+fn api_credential(token: String) -> Credential {
+    Credential { token, oauth: false, console: None, org: None, expires: None, source: "usoai" }
+}
+
+pub fn read_account(account: &crate::accounts::Account, runtime: &crate::account_usage::Runtime) -> UsageSnapshot {
+    use crate::accounts::CredentialSource;
+    let (present, credential) = match &account.source {
+        CredentialSource::Secret { .. } => (true, crate::secrets::read(&account.id).ok().flatten().map(api_credential)),
+        CredentialSource::EnvVar { name } => (true, std::env::var(name).ok().filter(|v| !v.trim().is_empty()).map(api_credential)),
+        CredentialSource::ConfigDir { path } => (path.is_dir(), load_credential_in(std::slice::from_ref(path))),
+        CredentialSource::Default => {
+            let key = std::env::var("OPENCODE_APIKEY").ok().filter(|v| !v.trim().is_empty());
+            (key.is_some() || present(), key.map(api_credential).or_else(load_credential))
+        }
+    };
     let mut snap = UsageSnapshot::default();
-    let held_until = BACKOFF_UNTIL.load(std::sync::atomic::Ordering::Relaxed);
+    let held_until = runtime.backoff_until.load(std::sync::atomic::Ordering::Relaxed);
     let now = now_ms();
     if held_until > now {
         snap.backoff_until = held_until;
         snap.note = format!("Rate limited — retrying in {}s", (held_until - now) / 1000);
         return snap;
     }
-    if !present() {
+    if !present {
         snap.status = "absent".into();
         return snap;
     }
-    let Some(cred) = load_credential() else {
+    let Some(cred) = credential else {
         snap.status = "needsAuth".into();
         snap.note = "Run opencode auth login to sign in to OpenCode.".into();
         return snap;
@@ -351,7 +352,7 @@ fn read_once() -> UsageSnapshot {
             snap.windows = windows;
             snap.fetched_at = now_ms();
             snap.note = format!("Go · via {}", cred.source);
-            CONSECUTIVE_429.store(0, std::sync::atomic::Ordering::Relaxed);
+            runtime.consecutive_429.store(0, std::sync::atomic::Ordering::Relaxed);
         }
         Err(FetchErr::Forbidden) => {
             snap.status = "none".into();
@@ -377,11 +378,11 @@ fn read_once() -> UsageSnapshot {
             crate::applog(&format!("opencode: usage endpoint answered 401, status={}", snap.status));
         }
         Err(FetchErr::RateLimited(ra)) => {
-            let n = CONSECUTIVE_429.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let n = runtime.consecutive_429.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             let exp = BACKOFF_BASE_SECS.saturating_mul(1u64 << (n - 1).min(4));
             let wait = exp.clamp(BACKOFF_BASE_SECS, BACKOFF_CAP_SECS).max(ra);
             let until = now_ms() + wait * 1000;
-            BACKOFF_UNTIL.store(until, std::sync::atomic::Ordering::Relaxed);
+            runtime.backoff_until.store(until, std::sync::atomic::Ordering::Relaxed);
             snap.backoff_until = until;
             snap.note = format!("Rate limited — retrying in {wait}s");
             crate::applog(&format!("opencode: 429 (x{n}), retrying in {wait}s"));
@@ -395,46 +396,9 @@ fn read_once() -> UsageSnapshot {
     snap
 }
 
-fn broadcast(app: &AppHandle, snap: UsageSnapshot) {
-    let st = app.state::<AppState>();
-    *st.opencode.lock().unwrap() = snap.clone();
-    persist(&snap);
-    let _ = app.emit("opencode", &snap);
-}
 
 pub fn start(app: AppHandle) {
-    std::thread::spawn(move || {
-        {
-            let st = app.state::<AppState>();
-            let snap = st.opencode.lock().unwrap().clone();
-            let _ = app.emit("opencode", &snap);
-        }
-        if !present() {
-            broadcast(&app, UsageSnapshot { status: "absent".into(), ..Default::default() });
-            loop {
-                for _ in 0..600 {
-                    if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-                if present() {
-                    break;
-                }
-            }
-        }
-        loop {
-            let snap = read_once();
-            let hold = snap.backoff_until.saturating_sub(now_ms()) / 1000;
-            broadcast(&app, snap);
-            for _ in 0..POLL_SECS.max(hold) {
-                if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        }
-    });
+    crate::account_usage::start(app, crate::accounts::ProviderKind::OpenCode, read_account);
 }
 
 /// For doctor: names the source and kind, never the token

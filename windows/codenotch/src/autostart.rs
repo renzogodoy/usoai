@@ -8,7 +8,7 @@ use std::process::Command;
 #[cfg(windows)]
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 #[cfg(windows)]
-const NAME: &str = "Codenotch";
+const NAME: &str = "usoai";
 
 #[cfg(windows)]
 fn reg(args: &[&str]) -> Option<(bool, String)> {
@@ -71,7 +71,7 @@ pub fn disable() -> Result<String, String> {
 #[cfg(not(windows))]
 fn desktop_entry_path() -> Option<std::path::PathBuf> {
     let dir = dirs::config_dir()?.join("autostart");
-    Some(dir.join("codenotch.desktop"))
+    Some(dir.join("usoai.desktop"))
 }
 
 #[cfg(not(windows))]
@@ -87,7 +87,7 @@ pub fn enable() -> Result<String, String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let entry = format!(
-        "[Desktop Entry]\nType=Application\nName=Codenotch\nExec=\"{}\" --silent\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+        "[Desktop Entry]\nType=Application\nName=usoai\nExec=\"{}\" --silent\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
         exe.display()
     );
     std::fs::write(&path, entry).map_err(|e| e.to_string())?;

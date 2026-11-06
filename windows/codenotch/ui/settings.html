@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <title>Codenotch Settings</title>
 <link rel="stylesheet" href="accounts-taskbar.css">
+<link rel="stylesheet" href="accounts.css">
 <style>
   /* The Mac's Settings (Sources/Settings/SettingsView.swift) over Windows 11's Mica: a sidebar card
      darker than the pane, grouped sections with captions as rows, and Windows' own control cues —
@@ -149,6 +150,8 @@
     <div id="body">
 
       <section class="pane" id="pane-accounts" role="tabpanel" aria-labelledby="tab-accounts" hidden>
+        <div id="multi-account-root" data-dynamic></div>
+        <div id="legacy-claude-settings" hidden>
         <div class="sec" id="claude-profiles-title" data-dynamic>Claude accounts</div>
         <div class="group" id="claude-profiles" data-dynamic></div>
         <form class="group profile-add" id="claude-add-form">
@@ -157,6 +160,7 @@
           <p id="claude-login-help">Each account uses the official Claude CLI sign-in in a separate folder.</p>
         </form>
         <p id="claude-profile-message" class="profile-message" role="status" aria-live="polite" data-dynamic></p>
+        </div>
         <div class="sec">Connected</div>
         <div class="group" id="acc-on" data-dynamic></div>
         <div id="acc-off-wrap" hidden>
@@ -1989,5 +1993,7 @@ window.addEventListener('focus', () => {
 boot();
 </script>
 <script src="accounts-taskbar.js"></script>
+<script src="account-view.js"></script>
+<script src="accounts.js"></script>
 </body>
 </html>

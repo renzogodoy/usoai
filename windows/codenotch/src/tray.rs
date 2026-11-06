@@ -13,7 +13,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         builder = builder.icon(icon);
     }
     builder
-        .tooltip(concat!("Codenotch v", env!("CARGO_PKG_VERSION")))
+        .tooltip(concat!("usoai v", env!("CARGO_PKG_VERSION")))
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, ev| handle(app, ev.id().as_ref()))
@@ -30,7 +30,22 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 fn menu_lines(app: &AppHandle, lang: &str) -> Vec<(String, String, bool)> {
     let now = crate::now_ms();
     let mut lines = Vec::new();
-    for id in crate::TRAY_PROVIDER_IDS {
+    let st = app.state::<crate::AppState>();
+    let cfg = st.cfg.lock().unwrap().clone();
+    let snapshots = st.account_usage.lock().unwrap().clone();
+    for account in cfg.accounts.iter().filter(|a| a.enabled && matches!(a.provider, crate::accounts::ProviderKind::Codex | crate::accounts::ProviderKind::OpenCode)) {
+        let provider = account.provider.id();
+        let snap = snapshots.get(&account.id).cloned().unwrap_or_else(|| crate::usage::UsageSnapshot { status: "none".into(), ..Default::default() });
+        if snap.status == "absent" { continue; }
+        let fraction = crate::ring_window(provider, &snap.windows, &cfg.antigravity_limit, &cfg.antigravity_model).filter(|w| w.count.is_none()).map(|w| w.used);
+        let label = format!("{} · {}", crate::provider_label(provider), account.label);
+        let head = traymenu::header(&label, fraction, traymenu::stale_since(&snap, now), now, lang);
+        lines.push((format!("refresh:{}", account.id), head, true));
+        for (n, line) in traymenu::provider_lines(&snap, now, lang).iter().enumerate() {
+            lines.push((format!("line:{}:{n}", account.id), format!("    {line}"), false));
+        }
+    }
+    for id in crate::TRAY_PROVIDER_IDS.into_iter().filter(|id| !matches!(*id, "codex" | "opencode")) {
         let snap = crate::snapshot_of(app, id);
         if snap.status == "absent" {
             continue;

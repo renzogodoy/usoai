@@ -141,6 +141,58 @@ fn is_24h_pattern(pattern: &str) -> bool {
     pattern.split('\'').step_by(2).any(|part| part.contains('H'))
 }
 
+#[tauri::command]
+pub fn account_ui_strings(app: tauri::AppHandle) -> std::collections::BTreeMap<&'static str, &'static str> {
+    use tauri::Manager;
+    let raw = app.state::<crate::AppState>().cfg.lock().unwrap().lang.clone();
+    let lang = if raw == "auto" { resolve_auto() } else { raw.as_str() };
+    let rows = [
+        ("title", "Accounts", "Cuentas"),
+        ("locale", "en", "es"),
+        ("used", "Used", "Usado"),
+        ("remaining", "Available", "Disponible"),
+        ("remaining_previous", "Available at last reading", "Disponible en la última lectura"),
+        ("resets", "Resets", "Se renueva"),
+        ("quota_5h", "5-hour limit", "Límite de 5 horas"),
+        ("quota_weekly", "Weekly limit", "Límite semanal"),
+        ("quota_monthly", "Monthly limit", "Límite mensual"),
+        ("no_usage", "No usage data yet.", "Aún no hay datos de consumo."),
+        ("add", "Add account", "Añadir cuenta"),
+        ("detect", "Detect accounts", "Detectar cuentas"),
+        ("name", "Account name", "Nombre de la cuenta"),
+        ("provider", "Provider", "Proveedor"),
+        ("method", "Connection method", "Método de conexión"),
+        ("path", "Existing profile folder", "Carpeta del perfil existente"),
+        ("folder", "Use an existing folder", "Usar una carpeta existente"),
+        ("api_key", "OpenCode Go API key", "Clave API de OpenCode Go"),
+        ("variable", "Environment variable", "Variable de entorno"),
+        ("secure_storage", "Saved in Windows Credential Manager", "Guardada en el Administrador de credenciales de Windows"),
+        ("default_profile", "Default profile", "Perfil predeterminado"),
+        ("official_login", "Sign in with the official CLI", "Iniciar sesión con el CLI oficial"),
+        ("login_help", "Official sign-in opens a separate browser or terminal window. OpenCode keys are stored securely in Windows.", "El inicio de sesión oficial abre una ventana del navegador o una consola. Las claves de OpenCode se guardan de forma segura en Windows."),
+        ("save", "Save", "Guardar"),
+        ("cancel", "Cancel", "Cancelar"),
+        ("monitor", "Monitor", "Monitorear"),
+        ("connect", "Connect", "Conectar"),
+        ("remove", "Remove", "Quitar"),
+        ("remove_confirm", "Remove this account from usoai? Its original profile folder will be kept.", "¿Quitar esta cuenta de usoai? Se conservará la carpeta original del perfil."),
+        ("import", "Add selected accounts", "Añadir cuentas seleccionadas"),
+        ("saved", "Account saved. Waiting for a usage reading.", "Cuenta guardada. Esperando la lectura de consumo."),
+        ("no_candidates", "No additional accounts found.", "No se encontraron cuentas adicionales."),
+        ("paused", "Monitoring paused", "Monitoreo pausado"),
+        ("connected", "Usage updated", "Consumo actualizado"),
+        ("stale", "Showing the previous reading", "Mostrando la lectura anterior"),
+        ("needs_login", "Sign-in required", "Falta iniciar sesión"),
+        ("not_found", "Profile not found", "Perfil no encontrado"),
+        ("backoff", "Waiting for the provider's retry time", "Esperando el plazo de reintento del proveedor"),
+        ("read_error", "Unable to read usage", "No se pudo consultar el consumo"),
+        ("waiting", "Waiting for a reading", "Esperando una lectura"),
+        ("finish_login", "Complete sign-in in the browser or terminal window.", "Completa el inicio de sesión en el navegador o en la consola."),
+        ("login_finished", "Sign-in finished. Waiting for a usage reading.", "Finalizó el inicio de sesión. Esperando la lectura de consumo."),
+    ];
+    rows.into_iter().map(|(key,en,es)| (key, if lang == "es" { es } else { en })).collect()
+}
+
 pub fn tr(lang: &str, key: &str) -> &'static str {
     let l = if lang == "auto" { resolve_auto() } else { lang };
     match (l, key) {

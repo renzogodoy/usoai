@@ -328,14 +328,15 @@ mod tests {
             }
         });
 
+        let agent = ureq::AgentBuilder::new().try_proxy_from_env(false).build();
         let url = format!("http://127.0.0.1:{port}/event?e=test");
 
         // 1. Hook request (no Origin, no Sec-Fetch-Site) -> 200 OK
-        let resp = ureq::post(&url).call().unwrap();
+        let resp = agent.post(&url).call().unwrap();
         assert_eq!(resp.status(), 200);
 
         // 2. Untrusted Origin -> 403 Forbidden
-        let err = ureq::post(&url)
+        let err = agent.post(&url)
             .set("Origin", "https://malicious.com")
             .call()
             .unwrap_err();
@@ -347,7 +348,7 @@ mod tests {
         }
 
         // 3. Sec-Fetch-Site: cross-site -> 403 Forbidden
-        let err = ureq::post(&url)
+        let err = agent.post(&url)
             .set("Sec-Fetch-Site", "cross-site")
             .call()
             .unwrap_err();
@@ -359,7 +360,7 @@ mod tests {
         }
 
         // 4. Localhost Origin -> 200 OK
-        let resp = ureq::post(&url)
+        let resp = agent.post(&url)
             .set("Origin", "http://localhost:3000")
             .call()
             .unwrap();

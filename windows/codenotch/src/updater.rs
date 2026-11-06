@@ -13,6 +13,9 @@ const INSTALLER_NAME: &str = "Codenotch-Setup.exe";
 const UNSET_PUBKEY: &str = "REPLACE_WITH_TAURI_PUBLIC_KEY";
 const CHECK_ERROR: &str = "Could not check for updates";
 const INSTALL_ERROR: &str = "Could not install the update";
+// A derivative must never offer or install the upstream application's binaries.
+const UPDATES_ENABLED: bool = false;
+const DISABLED_MESSAGE: &str = "Updates are disabled for usoai until its own release feed is configured.";
 
 #[derive(Clone, Serialize, Default)]
 pub struct UpdateState {
@@ -50,6 +53,9 @@ fn set(app: &AppHandle, next: UpdateState) {
 
 #[tauri::command]
 pub fn get_update_state() -> UpdateState {
+    if !UPDATES_ENABLED {
+        return UpdateState { message: Some(DISABLED_MESSAGE.into()), ..Default::default() };
+    }
     state().clone().unwrap_or_default()
 }
 
@@ -123,6 +129,10 @@ fn signed_feed_offer(app: &AppHandle) -> Option<String> {
 /// Returns immediately; release and signed-feed checks happen off the UI thread.
 #[tauri::command]
 pub fn check_for_update(app: AppHandle) {
+    if !UPDATES_ENABLED {
+        set(&app, get_update_state());
+        return;
+    }
     if state().as_ref().is_some_and(|s| s.checking || s.installing) {
         return;
     }
@@ -212,6 +222,7 @@ pub fn check_for_update(app: AppHandle) {
 /// supplies neither the version nor a URL.
 #[tauri::command]
 pub fn open_update_installer() -> Result<(), String> {
+    if !UPDATES_ENABLED { return Err(DISABLED_MESSAGE.into()); }
     let version = {
         let current = state();
         let offer = current.as_ref().ok_or("No update has been checked")?;
@@ -240,6 +251,7 @@ pub fn open_update_installer() -> Result<(), String> {
 /// Install only an offer previously found in a signed Tauri feed.
 #[tauri::command]
 pub fn install_update(app: AppHandle) {
+    if !UPDATES_ENABLED { return; }
     let offered = {
         let current = state();
         let Some(offer) = current.as_ref() else {
@@ -310,6 +322,7 @@ pub fn install_update(app: AppHandle) {
 }
 
 pub fn check_on_launch(app: &AppHandle) {
+    if !UPDATES_ENABLED { return; }
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(20));

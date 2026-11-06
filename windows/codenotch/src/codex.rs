@@ -30,21 +30,17 @@
 //! own endpoint. No sign-in and no session history at all means absent (no cell is shown).
 
 use crate::usage::{duration_from_seconds, LimitWindow, UsageSnapshot};
-use crate::AppState;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
 
-const POLL_SECS: u64 = 300; // Preserve the upstream cadence; a tray refresh interrupts it.
 const TAIL_BYTES: u64 = 256 * 1024;
 const CURRENT_FOR_MS: u64 = 5 * 60 * 1000;
 const ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 const BACKOFF_MIN_SECS: u64 = 60; // wait at least this long after a 429; Retry-After only raises it
 
-static REFRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Retry deadline given by the server (ms epoch): neither a manual refresh nor a restart may bypass it
-static BACKOFF_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// When the native client may be tried again after it came back with nothing.
 ///
 /// `read_app_server` spawns `codex app-server` and waits on it. On a machine that has Codex
@@ -52,11 +48,10 @@ static BACKOFF_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 /// a hidden process, up to twenty seconds long, for as long as the app is open. The native read is
 /// a fallback for managed sign-ins `auth.json` cannot describe, not something worth paying for on
 /// every poll, so a failed attempt stands the path down for half an hour.
-static NATIVE_RETRY_AFTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const NATIVE_STAND_DOWN_MS: u64 = 30 * 60 * 1000;
 
 pub fn request_refresh() {
-    REFRESH.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::account_usage::request_refresh(crate::accounts::ProviderKind::Codex);
 }
 
 fn now_ms() -> u64 {
@@ -82,17 +77,11 @@ pub fn load_persisted() -> UsageSnapshot {
             if !s.windows.is_empty() {
                 s.status = "stale".into();
             }
-            BACKOFF_UNTIL.store(s.backoff_until, std::sync::atomic::Ordering::Relaxed);
             s
         })
         .unwrap_or_default()
 }
 
-fn persist(s: &UsageSnapshot) {
-    if let Ok(t) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(store_path(), t);
-    }
-}
 
 // ---------------- Locating the executable ----------------
 
@@ -167,8 +156,9 @@ fn jwt_claims(token: &str) -> Option<serde_json::Value> {
 }
 
 /// Reads Codex's sign-in state; a missing file or missing field both mean "not signed in"
-fn load_credential() -> Option<Credential> {
-    let text = std::fs::read_to_string(auth_path()?).ok()?;
+fn load_credential() -> Option<Credential> { load_credential_in(&codex_home()?) }
+fn load_credential_in(home: &Path) -> Option<Credential> {
+    let text = std::fs::read_to_string(home.join("auth.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     let tokens = v.get("tokens")?;
     let access_token = tokens.get("access_token")?.as_str()?.trim().to_string();
@@ -220,7 +210,8 @@ fn fetch_usage(cred: &Credential) -> Result<serde_json::Value, LiveErr> {
                 .filter(|c| !c.is_control())
                 .take(160)
                 .collect();
-            crate::applog(&format!("codex: usage endpoint HTTP {code}: {head}"));
+            let _ = head; // Do not log a server body that could contain account data.
+            crate::applog(&format!("codex: usage endpoint HTTP {code}"));
             Err(LiveErr::NeedsAuth)
         }
         Err(ureq::Error::Status(429, r)) => {
@@ -533,6 +524,8 @@ fn native_codex() -> Option<PathBuf> {
     find_executable().filter(|p| p.extension().and_then(|x| x.to_str()) == Some("exe"))
 }
 
+pub fn login_executable() -> Option<PathBuf> { native_codex().or_else(find_executable) }
+
 fn app_server_snapshot(result: &serde_json::Value) -> Option<UsageSnapshot> {
     // A present multi-bucket map is authoritative: never substitute a legacy Spark bucket
     // (or a legacy bucket with no id) when the map does not contain core Codex.
@@ -561,10 +554,14 @@ fn app_server_snapshot(result: &serde_json::Value) -> Option<UsageSnapshot> {
         note: "via Codex app-server".into(), ..Default::default() })
 }
 
-fn read_app_server() -> Option<UsageSnapshot> {
+#[cfg(test)]
+fn read_app_server() -> Option<UsageSnapshot> { read_app_server_in(codex_home().as_deref()) }
+fn read_app_server_in(home: Option<&Path>) -> Option<UsageSnapshot> {
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
     let mut command = Command::new(native_codex()?);
+    if let Some(home) = home { command.env("CODEX_HOME", home); }
+    command.env_remove("OPENAI_API_KEY").env_remove("OPENAI_BASE_URL");
     command.arg("app-server").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(windows)]
     { use std::os::windows::process::CommandExt; command.creation_flags(0x0800_0000); }
@@ -610,20 +607,27 @@ pub fn present() -> bool {
         || codex_home().map(|h| h.join("sessions").is_dir()).unwrap_or(false)
 }
 
-fn read_once() -> UsageSnapshot {
+pub fn read_account(account: &crate::accounts::Account, runtime: &crate::account_usage::Runtime) -> UsageSnapshot {
+    let Some(home) = crate::accounts::config_dir(account) else {
+        return UsageSnapshot { status: "needsAuth".into(), ..Default::default() };
+    };
+    let present = home.join("auth.json").is_file() || home.join("sessions").is_dir();
+    if !present && account.id != "codex" {
+        return UsageSnapshot { status: "needsAuth".into(), note: "Sign in to this Codex profile first".into(), ..Default::default() };
+    }
     let mut snap = UsageSnapshot::default();
     // Note attached to the fallback reading when the live read failed; needs_auth picks the empty state when there is no fallback either
     let mut live_note: Option<String> = None;
     let mut needs_auth = false;
-    let held_until = BACKOFF_UNTIL.load(std::sync::atomic::Ordering::Relaxed);
+    let held_until = runtime.backoff_until.load(std::sync::atomic::Ordering::Relaxed);
     let now = now_ms();
     if held_until > now {
         snap.backoff_until = held_until;
         live_note = Some(format!("Rate limited — retrying in {}s", (held_until - now) / 1000));
     } else {
-        match load_credential() {
+        match load_credential_in(&home) {
             None => {
-                if auth_path().map(|p| p.is_file()).unwrap_or(false) {
+                if home.join("auth.json").is_file() {
                     crate::applog("codex: auth.json has no usable access_token/account_id, falling back to the rollout");
                 }
             }
@@ -652,7 +656,7 @@ fn read_once() -> UsageSnapshot {
                 }
                 Err(LiveErr::RateLimited(secs)) => {
                     let until = now_ms() + secs * 1000;
-                    BACKOFF_UNTIL.store(until, std::sync::atomic::Ordering::Relaxed);
+                    runtime.backoff_until.store(until, std::sync::atomic::Ordering::Relaxed);
                     snap.backoff_until = until;
                     live_note = Some(format!("Rate limited — retrying in {secs}s"));
                     crate::applog(&format!("codex: usage endpoint returned 429, retrying in {secs}s"));
@@ -667,18 +671,18 @@ fn read_once() -> UsageSnapshot {
     // Keep the no-process HTTP path first, and do not use a second transport to bypass
     // its Retry-After. The native client can handle managed sign-in that auth.json cannot.
     if snap.backoff_until <= now_ms()
-        && NATIVE_RETRY_AFTER.load(std::sync::atomic::Ordering::Relaxed) <= now_ms()
+        && runtime.native_retry_after.load(std::sync::atomic::Ordering::Relaxed) <= now_ms()
     {
-        match read_app_server() {
+        match read_app_server_in(Some(&home)) {
             Some(native) => return native,
-            None => NATIVE_RETRY_AFTER.store(
+            None => runtime.native_retry_after.store(
                 now_ms() + NATIVE_STAND_DOWN_MS,
                 std::sync::atomic::Ordering::Relaxed,
             ),
         }
     }
     // Fallback: rollout
-    match newest_rollout().and_then(|p| tail_text(&p)).and_then(|t| snapshot_from_rollout(&t)) {
+    match newest_rollout_in(&home).and_then(|p| tail_text(&p)).and_then(|t| snapshot_from_rollout(&t)) {
         Some((windows, recorded, plan)) => {
             let rec = recorded.unwrap_or(0);
             let fresh = rec > 0 && now_ms().saturating_sub(rec) <= CURRENT_FOR_MS;
@@ -696,7 +700,7 @@ fn read_once() -> UsageSnapshot {
         None => {
             snap.status = if needs_auth {
                 "needsAuth"
-            } else if present() {
+            } else if present {
                 "none"
             } else {
                 "absent"
@@ -704,7 +708,7 @@ fn read_once() -> UsageSnapshot {
             .into();
             snap.note = match live_note {
                 Some(n) => n,
-                None if present() => "Codex has not recorded a usage snapshot yet".into(),
+                None if present => "Codex has not recorded a usage snapshot yet".into(),
                 None => String::new(),
             };
         }
@@ -720,47 +724,9 @@ fn cap(s: &str) -> String {
     }
 }
 
-fn broadcast(app: &AppHandle, snap: UsageSnapshot) {
-    let st = app.state::<AppState>();
-    *st.codex.lock().unwrap() = snap.clone();
-    persist(&snap);
-    let _ = app.emit("codex", &snap);
-}
 
 pub fn start(app: AppHandle) {
-    std::thread::spawn(move || {
-        {
-            let st = app.state::<AppState>();
-            let snap = st.codex.lock().unwrap().clone();
-            let _ = app.emit("codex", &snap);
-        }
-        if !present() {
-            broadcast(&app, UsageSnapshot { status: "absent".into(), ..Default::default() });
-            // Codex is not installed: look again every 10 minutes
-            loop {
-                for _ in 0..600 {
-                    if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-                if present() {
-                    break;
-                }
-            }
-        }
-        loop {
-            let snap = read_once();
-            let hold = snap.backoff_until.saturating_sub(now_ms()) / 1000;
-            broadcast(&app, snap);
-            for _ in 0..POLL_SECS.max(hold) {
-                if REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        }
-    });
+    crate::account_usage::start(app, crate::accounts::ProviderKind::Codex, read_account);
 }
 
 /// For doctor: contains no secrets

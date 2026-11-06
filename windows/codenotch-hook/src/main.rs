@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-const DEFAULT_PORT: u16 = 48666;
+const DEFAULT_PORT: u16 = 48667;
 const MAX_STDIN: u64 = 256 * 1024;
 
 fn main() {
@@ -36,7 +36,7 @@ fn main() {
 /// Pulls "port": N out of %APPDATA%\codenotch\config.json (hand-rolled scan, no dependency)
 fn read_port() -> u16 {
     let path = match std::env::var("APPDATA") {
-        Ok(a) => format!("{a}\\codenotch\\config.json"),
+        Ok(a) => format!("{a}\\usoai\\config.json"),
         Err(_) => return DEFAULT_PORT,
     };
     let Ok(txt) = std::fs::read_to_string(path) else {

@@ -166,7 +166,20 @@ pub fn get_taskbar_items(app: AppHandle) -> Vec<Item> {
         items.push(Item { id: format!("claude@{}", p.id), headline_id, work_state, name: if p.id == "default" && p.name == "Claude" { "Claude".into() } else { format!("Claude · {}", p.name) },
             provider: "claude".into(), snapshot });
     }
-    for id in crate::TRAY_PROVIDER_IDS.into_iter().filter(|id| *id != "claude") {
+    let account_snapshots = st.account_usage.lock().unwrap().clone();
+    for account in cfg.accounts.iter().filter(|a| a.enabled && matches!(a.provider, crate::accounts::ProviderKind::Codex | crate::accounts::ProviderKind::OpenCode)) {
+        let provider = account.provider.id();
+        if !cfg.notch_slots.is_empty() && !cfg.notch_slots.iter().any(|s| s.provider == provider || s.provider == account.id) { continue; }
+        let snapshot = account_snapshots.get(&account.id).cloned().unwrap_or_else(|| if account.id == provider {
+            crate::snapshot_of(&app, provider)
+        } else { UsageSnapshot { status: "none".into(), ..Default::default() } });
+        if snapshot.status == "absent" { continue; }
+        let headline_id = crate::ring_window(provider, &snapshot.windows, &cfg.antigravity_limit, &cfg.antigravity_model).map(|w| w.id.clone());
+        let work_state = if account.id == provider { crate::taskbar_activity::work_state(&app, provider, None) } else { "idle".into() };
+        items.push(Item { id: account.id.clone(), provider: provider.into(), headline_id, work_state,
+            name: format!("{} · {}", crate::provider_label(provider), account.label), snapshot });
+    }
+    for id in crate::TRAY_PROVIDER_IDS.into_iter().filter(|id| !matches!(*id, "claude" | "codex" | "opencode")) {
         if !cfg.notch_slots.is_empty() && !cfg.notch_slots.iter().any(|s| s.provider == id) { continue; }
         let snapshot = crate::snapshot_of(&app, id);
         if snapshot.status == "absent" { continue; }

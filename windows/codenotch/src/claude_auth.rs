@@ -1,45 +1,48 @@
 //! User-initiated sign-in through the standalone Claude Code CLI. OAuth stays in
 //! the CLI: no codes, tokens, browser URLs or credential writes cross widget IPC.
 use serde::Serialize;
-use std::{process::{Child, Command}, sync::{atomic::{AtomicBool, Ordering}, Mutex}, time::{Duration, Instant}};
+use std::{process::{Child, Command}, sync::{Mutex, OnceLock}, time::{Duration, Instant}};
 
-static BUSY: AtomicBool = AtomicBool::new(false);
-static MESSAGE: Mutex<String> = Mutex::new(String::new());
-static PROFILE_ID: Mutex<Option<String>> = Mutex::new(None);
-
-/// The lock guards one short line of status text. A panic while it is held would
-/// poison it and take the whole card down with `unwrap`, which is a steep price
-/// for a string nobody has to trust — so take it back and carry on.
-fn message() -> std::sync::MutexGuard<'static, String> {
-    MESSAGE.lock().unwrap_or_else(|e| e.into_inner())
+#[derive(Clone, Default, Serialize)]
+pub struct ProfileAuthState { pub busy: bool, pub message: String }
+#[derive(Default)]
+struct Registry { profiles: std::collections::HashMap<String, ProfileAuthState>, last_profile: Option<String> }
+fn registry() -> std::sync::MutexGuard<'static, Registry> {
+    static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(Registry::default())).lock().unwrap_or_else(|e| e.into_inner())
 }
-
 #[derive(Serialize)]
-pub struct AuthState { pub busy: bool, pub message: String, pub profile_id: Option<String> }
-
-pub fn state() -> AuthState {
-    // Do not hold the message mutex while acquiring the profile mutex: usage
-    // acknowledgement holds the profile while clearing the corresponding line.
-    let status_message = message().clone();
-    let profile_id = PROFILE_ID.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    AuthState { busy: BUSY.load(Ordering::Acquire), message: status_message, profile_id }
+pub struct AuthState {
+    pub busy: bool, pub message: String, pub profile_id: Option<String>,
+    pub accounts: std::collections::HashMap<String, ProfileAuthState>,
 }
-
-/// Shared with background renewal so the two native clients cannot rotate the
-/// same credential at once. Drop also releases the gate on spawn/error paths.
-pub struct AuthGuard;
-pub fn try_acquire() -> Option<AuthGuard> {
-    BUSY.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).ok().map(|_| AuthGuard)
+pub fn state() -> AuthState {
+    let data = registry();
+    AuthState { busy: data.profiles.values().any(|s| s.busy),
+        message: data.last_profile.as_ref().and_then(|id| data.profiles.get(id)).map(|s| s.message.clone()).unwrap_or_default(),
+        profile_id: data.last_profile.clone(), accounts: data.profiles.clone() }
+}
+pub fn state_for(profile_id: &str) -> ProfileAuthState { registry().profiles.get(profile_id).cloned().unwrap_or_default() }
+fn set_message(profile_id: &str, message: &str) {
+    let mut data = registry();
+    data.last_profile = Some(profile_id.into());
+    data.profiles.entry(profile_id.into()).or_default().message = message.into();
+}
+pub struct AuthGuard { profile_id: String }
+#[cfg(test)]
+pub fn try_acquire() -> Option<AuthGuard> { try_acquire_for("default") }
+pub fn try_acquire_for(profile_id: &str) -> Option<AuthGuard> {
+    let mut data = registry();
+    let state = data.profiles.entry(profile_id.into()).or_default();
+    if state.busy { return None; }
+    state.busy = true;
+    Some(AuthGuard { profile_id: profile_id.into() })
 }
 impl Drop for AuthGuard {
-    fn drop(&mut self) { BUSY.store(false, Ordering::Release); }
+    fn drop(&mut self) { if let Some(state) = registry().profiles.get_mut(&self.profile_id) { state.busy = false; } }
 }
-
 pub fn usage_succeeded(profile_id: &str) {
-    // A new login writes its profile before its message. Holding this lock
-    // prevents an older successful read from erasing that newly-written message.
-    let current_profile = PROFILE_ID.lock().unwrap_or_else(|e| e.into_inner());
-    if !BUSY.load(Ordering::Acquire) && current_profile.as_deref() == Some(profile_id) { message().clear(); }
+    if let Some(state) = registry().profiles.get_mut(profile_id) { if !state.busy { state.message.clear(); } }
 }
 
 // No interpolated shell input: even paths containing apostrophes arrive in env.
@@ -118,15 +121,19 @@ fn login_command(cli: &std::path::Path, profile_dir: &std::path::Path) -> Result
     Ok(cmd)
 }
 
-fn terminate(child: &mut Child) {
+pub(crate) fn terminate(child: &mut Child) {
     #[cfg(windows)] {
         use std::os::windows::process::CommandExt;
         use std::process::Stdio;
         if let Some(root) = std::env::var_os("SystemRoot") {
             // A .cmd CLI may have node children: terminate only this owned tree.
-            let _ = Command::new(std::path::PathBuf::from(root).join("System32/taskkill.exe"))
+            if let Ok(mut killer) = Command::new(std::path::PathBuf::from(root).join("System32/taskkill.exe"))
                 .args(["/PID", &child.id().to_string(), "/T", "/F"])
-                .creation_flags(0x0800_0000).stdout(Stdio::null()).stderr(Stdio::null()).status();
+                .creation_flags(0x0800_0000).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while matches!(killer.try_wait(), Ok(None)) && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(25)); }
+                let _ = killer.kill(); let _ = killer.wait();
+            }
         }
     }
     let _ = child.kill();
@@ -151,17 +158,16 @@ pub fn start_login() -> Result<(), String> {
 
 pub fn start_profile_login(profile_dir: &std::path::Path, profile_id: &str) -> Result<(), String> {
     let cli = crate::usage::find_cli().ok_or("Claude Code CLI not found. Install the standalone CLI first.")?;
-    let guard = try_acquire().ok_or("Claude sign-in or renewal is already running.")?;
+    let guard = try_acquire_for(profile_id).ok_or("Claude sign-in or renewal is already running.")?;
     let mut cmd = login_command(&cli, profile_dir)?;
     let mut child = cmd.spawn().map_err(|_| "Unable to open Claude sign-in window.")?;
-    *PROFILE_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(profile_id.to_string());
-    *message() = "Complete sign-in in the browser or terminal window.".into();
+    set_message(profile_id, "Complete sign-in in the browser or terminal window.");
     let profile_id = profile_id.to_string();
     std::thread::spawn(move || {
         let ok = wait_child(&mut child, Duration::from_secs(15 * 60));
-        *message() = if ok { "Sign-in complete. Refreshing usage..." } else {
+        set_message(&profile_id, if ok { "Sign-in complete. Refreshing usage..." } else {
             "Sign-in cancelled, failed or timed out. Try again."
-        }.into();
+        });
         drop(guard);
         if ok { crate::usage::request_account_refresh(&profile_id); }
     });
@@ -175,17 +181,27 @@ mod tests {
     fn gate_excludes_login_and_renewal_and_releases_on_drop() {
         let guard = try_acquire().unwrap();
         assert!(try_acquire().is_none());
-        assert!(state().busy);
+        assert!(state_for("default").busy);
         drop(guard);
-        assert!(!state().busy);
+        assert!(!state_for("default").busy);
         assert!(try_acquire().is_some());
-        *PROFILE_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some("work".into());
-        *message() = "Sign-in complete. Refreshing usage...".into();
+        set_message("work", "Sign-in complete. Refreshing usage...");
         usage_succeeded("default");
         assert!(!state().message.is_empty(), "an unrelated account cannot acknowledge this account's sign-in");
         usage_succeeded("work");
         assert!(state().message.is_empty());
-        *PROFILE_ID.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        registry().last_profile = None;
+    }
+    #[test]
+    fn login_and_renewal_are_isolated_by_profile() {
+        let work = try_acquire_for("test-work").unwrap();
+        assert!(try_acquire_for("test-work").is_none());
+        let personal = try_acquire_for("test-personal").unwrap();
+        assert!(state_for("test-work").busy);
+        drop(work);
+        assert!(!state_for("test-work").busy);
+        assert!(state_for("test-personal").busy);
+        drop(personal);
     }
     #[test]
     #[cfg(windows)]

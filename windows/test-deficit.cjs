@@ -5,8 +5,8 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 
 const html = readFileSync(join(__dirname, 'codenotch/ui/notch.html'), 'utf8');
-const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)];
-assert.equal(scripts.length, 1, 'the notch has one script');
+const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)];
+assert.equal(scripts.length, 1, 'the notch has one inline script');
 const script = scripts[0][1];
 
 function sourceOf(pattern, name) {

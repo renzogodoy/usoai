@@ -34,7 +34,7 @@ const TAIL_BYTES: u64 = 256 * 1024;
 /// Run log: %APPDATA%\codenotch\watch.log (cleared at startup to keep troubleshooting simple)
 pub fn wlog(msg: &str) {
     let Some(dir) = dirs::config_dir() else { return };
-    let p = dir.join("codenotch").join("watch.log");
+    let p = dir.join("usoai").join("watch.log");
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -134,7 +134,7 @@ pub fn start(app: AppHandle) {
         };
         // Clear the previous log
         if let Some(dir) = dirs::config_dir() {
-            let _ = std::fs::write(dir.join("codenotch").join("watch.log"), "");
+            let _ = std::fs::write(dir.join("usoai").join("watch.log"), "");
         }
         wlog(&format!("watcher started v{}", env!("CARGO_PKG_VERSION")));
         let mut pending: Vec<PathBuf> = roots();

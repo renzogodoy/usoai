@@ -88,7 +88,7 @@ pub fn run() -> String {
 
     o += "\nwatch.log (the most recent watcher log, if any):\n";
     if let Some(dir) = dirs::config_dir() {
-        let p = dir.join("codenotch").join("watch.log");
+        let p = dir.join("usoai").join("watch.log");
         match std::fs::read_to_string(&p) {
             Ok(t) if !t.trim().is_empty() => {
                 for line in t.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev() {

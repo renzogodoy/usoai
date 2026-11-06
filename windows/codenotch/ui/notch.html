@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
+<script src="account-view.js"></script>
 <style>
   /* The palette. Dark is the notch as it has always been drawn; light is the same shapes in the
      inks Settings already uses, plus the Mac's own light secondary (#6b6b6b, Palette.textSecondary).
@@ -1312,12 +1313,25 @@ function claudeCells(){
       .map(w=>Object.assign({},w,{id:String(w.id).split('@')[0]}))})
   }));
 }
+const accountReadings = new Map();
+let accountMetadata = [];
+function accountCells(provider,fallback){
+  const configured=accountMetadata.filter(a=>a.provider===provider);
+  if(configured.length){
+    const records=configured.filter(a=>a.enabled).map(a=>accountReadings.get(a.id)||{
+      account_id:a.id,provider,label:a.label,snapshot:a.id===provider?fallback:{status:'none',windows:[],fetched_at:0,note:''}});
+    return UsoaiAccounts.cells(records,accountMetadata);
+  }
+  const records=[...accountReadings.values()].filter(a=>a.provider===provider);
+  if(records.length)return UsoaiAccounts.cells(records,accountMetadata);
+  return fallback.status==='absent'?[]:[{id:provider,base:provider,name:UsoaiAccounts.providerName(provider),glyph:provider==='codex'?'Cx':'OC',snap:fallback}];
+}
 function providers(){
   const list=claudeCells();
-  if(codexSnap.status!=='absent') list.push({id:'codex',base:'codex',name:'Codex',glyph:'Cx',snap:codexSnap});
+  list.push(...accountCells('codex',codexSnap));
   if(glmSnap.status!=='absent') list.push({id:'glm',base:'glm',name:'z.ai',glyph:'Z.ai',snap:glmSnap});
   if(deepseekSnap.status!=='absent') list.push({id:'deepseek',base:'deepseek',name:'DeepSeek Harness',glyph:'DS',snap:deepseekSnap});
-  if(opencodeSnap.status!=='absent') list.push({id:'opencode',base:'opencode',name:'OpenCode',glyph:'OC',snap:opencodeSnap});
+  list.push(...accountCells('opencode',opencodeSnap));
   if(commandcodeSnap.status!=='absent') list.push({id:'commandcode',base:'commandcode',name:'Command Code',glyph:'CC',snap:commandcodeSnap});
   if(cursorSnap.status!=='absent') list.push({id:'cursor',base:'cursor',name:'Cursor',glyph:'Cu',snap:cursorSnap});
   if(grokSnap.status!=='absent') list.push({id:'grok',base:'grok',name:'Grok',glyph:'Gk',snap:grokSnap});
@@ -1439,6 +1453,7 @@ function dashedArc(r,frac,color,width,extra=''){
 
 // QUOTA_RING_RENDER_START
 function renderRing(){
+  function accountWorkState(p){return ['codex','opencode'].includes(p.base)&&p.id!==p.base?'idle':workState(p.base);}
   const ps=providers();
   // Rebuild the DOM only when the structure changes (never swap the element under the cursor)
   const want=ps.map(p=>p.id+':'+(glyphs[p.base]?glyphs[p.base].kind:'-')).join(',');
@@ -1458,7 +1473,7 @@ function renderRing(){
     if(weeklyRing!=='off'){ // the week, thinner and at its own radius, in its own colour: a session at 12% beside a week at 91% is the case this exists for
       const wk=ringWindow(p.snap,p.base,weeklyOf(p.snap,p.base));
       // Inside, it shares the gap with the working indicator, so it stands down while that is showing
-      const taken=weeklyRing==='inside'&&workState(p.base)!=='idle';
+      const taken=weeklyRing==='inside'&&accountWorkState(p)!=='idle';
       if(wk&&(!h||wk.id!==h.id)&&!taken){
         const r=weeklyRing==='inside'?16:31;
         const frac=Math.min(Math.max(meteredFraction(wk.used,showRemaining),0),1);
@@ -1474,7 +1489,7 @@ function renderRing(){
     svg.innerHTML=inner;
     { // thin inner arc: spinning white = working, yellow pulse = waiting on you (one animation for all four, different sources)
       // Its own layer, so a stale reading can dim around it without dimming it: see `.ringwrap.stale`
-      const ws=workState(p.base);
+      const ws=accountWorkState(p);
       if(ws==='running') activity.innerHTML=`<g class="arc-spin">${svgArc(19,0.28,INK,2.5)}</g>`;
       else if(ws==='attention') activity.innerHTML=`<g class="arc-pulse"><circle cx="28" cy="28" r="19" fill="none" stroke="${WATCH}" stroke-width="2.5"/></g>`;
       else activity.innerHTML='';
@@ -1594,7 +1609,7 @@ function renderCard(){
     }
   }else{ // other providers: detected activity rows (Cursor reports state; Codex/Antigravity are inferred from recent writes)
     // Waiting before busy, newest first within each, so what gets cut is what matters least
-    const acts=activity.filter(a=>a.provider===p.base).sort((a,b)=>(b.state==='waiting')-(a.state==='waiting')||b.since-a.since);
+    const acts=activity.filter(a=>a.provider===p.base&&(!['codex','opencode'].includes(p.base)||p.id===p.base)).sort((a,b)=>(b.state==='waiting')-(a.state==='waiting')||b.since-a.since);
     if(acts.length){
       html+=`<div class="c-sessions">`;
       for(const a of acts.slice(0,SESSION_ROWS)){
@@ -1818,7 +1833,8 @@ function refreshRing(id){
   // The cell id addresses the DOM, the provider id addresses Rust: a second Claude
   // account's cell is `claude@work`, which no command answers to.
   const provider=(providers().find(p=>p.id===id)||{}).base||id;
-  invoke('refresh_ring',{provider}).then(coming=>{if(!coming)settle(id);}).catch(()=>settle(id));
+  const request=['codex','opencode'].includes(provider)?invoke('refresh_account',{id}):invoke('refresh_ring',{provider});
+  request.then(coming=>{if(!coming)settle(id);}).catch(()=>settle(id));
 }
 // The reading has a layer of its own that renders never replace, turned as a whole element so the
 // compositor can run it; it finishes its turn whenever the press lets go
@@ -2346,6 +2362,15 @@ listen('usage',e=>{usage=e.payload||usage;claudeActionMessage='';settle('claude'
 listen('state',e=>{stateSnap=e.payload||stateSnap;setUiLanguage(stateSnap.lang_resolved);renderRing();if(card.classList.contains('show'))renderCard();})
   .catch(e=>notice('listen(state) failed: '+e));
 listen('notice',e=>notice(e.payload)).catch(()=>{});
+async function refreshAccountReadings(){
+  const [metadata,readings]=await Promise.all([invoke('list_accounts'),invoke('get_account_usage')]);
+  accountMetadata=metadata||[];accountReadings.clear();
+  for(const reading of readings||[])accountReadings.set(reading.account_id,reading);
+  renderRing();if(card.classList.contains('show'))renderCard();
+}
+listen('usage_update',e=>{const reading=e.payload;if(!reading||!reading.account_id)return;accountReadings.set(reading.account_id,reading);settle(reading.account_id);renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
+listen('accounts_changed',()=>refreshAccountReadings().catch(()=>{})).catch(()=>{});
+refreshAccountReadings().catch(()=>{});
 listen('codex',e=>{codexSnap=e.payload||codexSnap;settle('codex');renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
 listen('cursor',e=>{cursorSnap=e.payload||cursorSnap;settle('cursor');renderRing();if(card.classList.contains('show'))renderCard();}).catch(()=>{});
 invoke('get_cursor').then(u=>{cursorSnap=u||cursorSnap;renderRing();}).catch(()=>{});

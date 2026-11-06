@@ -1,0 +1,27 @@
+#multi-account-root .account-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0}
+#multi-account-root .account-card{padding:12px;border-bottom:1px solid var(--line)}
+#multi-account-root .account-card:last-child{border-bottom:0}
+#multi-account-root .account-heading{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#multi-account-root .account-heading strong{min-width:82px}
+#multi-account-root input,#multi-account-root select{color:var(--text);background:var(--side);border:1px solid var(--line);border-radius:6px;padding:6px;box-sizing:border-box;min-width:0}
+#multi-account-root input[type=checkbox]{width:auto}
+#multi-account-root .account-label{flex:1;min-width:100px;max-width:210px}
+#multi-account-root .account-source{font-size:11px;color:var(--text2);overflow-wrap:anywhere;margin:8px 0}
+#multi-account-root .account-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#multi-account-root .account-status{font-size:12px;color:var(--text2);margin:6px 0}
+#multi-account-root .account-message{font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;min-height:18px}
+#multi-account-root .account-message[data-error=true]{color:#e45d5d}
+#multi-account-root .account-form{padding:12px;display:grid;gap:10px}
+#multi-account-root .account-field{display:grid;gap:4px;font-size:12px}
+#multi-account-root .account-form [hidden]{display:none}
+#multi-account-root .candidate-row{display:flex;gap:8px;padding:10px;align-items:start;font-size:12px;overflow-wrap:anywhere}
+#multi-account-root [hidden]{display:none!important}
+#multi-account-root .account-quotas{display:grid;gap:8px;margin:8px 0}
+#multi-account-root .account-quota{padding:9px;border:1px solid var(--line);border-radius:7px;background:var(--group)}
+#multi-account-root .account-quota-title{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px}
+#multi-account-root .account-quota-title span{color:var(--text2);font-size:11px}
+#multi-account-root .account-quota-figures{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px;margin:7px 0}
+#multi-account-root .account-quota-track{height:5px;background:var(--line);border-radius:4px;overflow:hidden}
+#multi-account-root .account-quota-fill{height:100%;background:var(--accent)}
+#multi-account-root .account-quota-reset{font-size:11px;color:var(--text2);margin-top:6px}
+#multi-account-root .account-quota-stale .account-quota-fill{opacity:.4}

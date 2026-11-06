@@ -34,6 +34,10 @@ pub struct ClaudeProfileConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub accounts: Vec<crate::accounts::Account>,
+    #[serde(default)]
+    pub excluded_account_dirs: Vec<PathBuf>,
+    #[serde(default)]
     pub claude_profiles: Vec<ClaudeProfileConfig>,
     /// off | left | right; an owned child window on the primary Windows taskbar.
     #[serde(default = "default_taskbar_mode")]
@@ -307,7 +311,7 @@ fn default_antigravity_model() -> String {
 }
 
 fn default_port() -> u16 {
-    48666
+    48667
 }
 fn default_lang() -> String {
     "auto".into()
@@ -316,6 +320,8 @@ fn default_lang() -> String {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            accounts: Vec::new(),
+            excluded_account_dirs: Vec::new(),
             claude_profiles: Vec::new(),
             taskbar_mode: default_taskbar_mode(),
             taskbar_width: default_taskbar_width(),
@@ -361,7 +367,7 @@ impl Default for Config {
 pub fn config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("codenotch")
+        .join("usoai")
         .join("config.json")
 }
 
@@ -380,7 +386,8 @@ fn without_bom(text: String) -> String {
 /// hand-edit typo reset everything without a word. File names only in the log line: run.log is what
 /// gets pasted into issues.
 fn set_aside(path: &std::path::Path, err: &serde_json::Error) {
-    let kept = path.with_file_name("config.unreadable.json");
+    let kept = config_path().with_file_name("config.unreadable.json");
+    if let Some(parent) = kept.parent() { let _ = std::fs::create_dir_all(parent); }
     let note = match std::fs::copy(path, &kept) {
         Ok(_) => "the file is kept as config.unreadable.json".to_string(),
         Err(e) => format!("could not keep a copy ({e})"),
@@ -390,6 +397,11 @@ fn set_aside(path: &std::path::Path, err: &serde_json::Error) {
 
 pub fn load() -> Config {
     let path = config_path();
+    // Import legacy settings read-only on first launch; all future writes target usoai.
+    let path = if path.exists() { path } else {
+        dirs::config_dir().map(|d| d.join("codenotch").join("config.json"))
+            .filter(|legacy| legacy.is_file()).unwrap_or(path)
+    };
     let raw = std::fs::read_to_string(&path).ok().map(without_bom);
     let mut cfg: Config = match raw.as_deref().map(serde_json::from_str::<Config>) {
         Some(Ok(cfg)) => cfg,
@@ -399,6 +411,7 @@ pub fn load() -> Config {
         }
         None => Config::default(),
     };
+    if cfg.port == 48666 { cfg.port = default_port(); }
     keep_open_on_upgrade(&mut cfg, raw.as_deref());
 
     // Migration: before slots existed the notch was a plain provider list, one ring each. That is
@@ -436,6 +449,9 @@ pub fn load() -> Config {
     // Mac's own init does: critical first, then watch below it.
     cfg.critical_limit = cfg.critical_limit.clamp(0.02, 1.0);
     cfg.watch_limit = clamp_watch_limit(cfg.watch_limit, cfg.critical_limit);
+    if let Some(home) = dirs::home_dir() {
+        crate::accounts::migrate(&mut cfg, &home);
+    }
     cfg
 }
 
@@ -524,8 +540,12 @@ pub fn save_checked(cfg: &Config) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|_| "Unable to create the settings folder".to_string())?;
     }
-    let txt = serde_json::to_string_pretty(cfg).map_err(|_| "Unable to serialize settings".to_string())?;
-    std::fs::write(path, txt).map_err(|_| "Unable to save settings".to_string())
+    let mut next = cfg.clone();
+    if let Some(home) = dirs::home_dir() {
+        crate::accounts::migrate(&mut next, &home);
+    }
+    let txt = serde_json::to_string_pretty(&next).map_err(|_| "Unable to serialize settings".to_string())?;
+    crate::atomic_file::write(&path, txt.as_bytes()).map_err(|_| "Unable to save settings".to_string())
 }
 
 #[cfg(test)]
